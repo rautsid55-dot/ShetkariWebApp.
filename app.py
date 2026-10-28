@@ -1,11 +1,15 @@
-﻿import os
-from flask import Flask, render_template_string, request, redirect, url_for
+import os
+from flask import Flask, render_template_string, request, redirect, url_for, session
 import psycopg2
 
 app = Flask(__name__)
+app.secret_key = "shetkari_secret_key_98765" # Required for login sessions
 
-# 🛑 REPLACE THIS with your Supabase URL later! 🛑
-DB_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:YOUR_PASSWORD@db.xxxx.supabase.co:5432/postgres")
+# 🛑 DEFAULT LOGIN PASSWORD
+APP_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin")
+
+# 🛑 DATABASE CONNECTION
+DB_URL = os.environ.get("DATABASE_URL", "")
 
 def get_db():
     return psycopg2.connect(DB_URL, sslmode='require')
@@ -15,19 +19,58 @@ def init_db():
         conn = get_db()
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS farmers (
-            id SERIAL PRIMARY KEY, name TEXT UNIQUE, phone TEXT,
-            outstanding REAL DEFAULT 0, score INTEGER DEFAULT 100,
-            status TEXT DEFAULT 'SAFE', promised_date TEXT DEFAULT NULL
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE,
+            phone TEXT,
+            outstanding REAL DEFAULT 0,
+            score INTEGER DEFAULT 100,
+            status TEXT DEFAULT 'SAFE',
+            promised_date TEXT DEFAULT NULL
         )''')
         c.execute('''CREATE TABLE IF NOT EXISTS logs (
-            id SERIAL PRIMARY KEY, farmer_id INTEGER, action TEXT,
-            points INTEGER, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id SERIAL PRIMARY KEY,
+            farmer_id INTEGER,
+            action TEXT,
+            points INTEGER,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.commit()
         conn.close()
         print("Database initialized successfully.")
     except Exception as e:
-        print(f"DB Error: {e}")
+        print(f"DB Init Error: {e}")
+
+# 🛑 RUN INIT_DB IMMEDIATELY SO GUNICORN CREATES TABLES
+init_db()
+
+# --- HTML TEMPLATES ---
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login - Shetkari CRM</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #0a0a0c; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .card { background-color: #1c1c1e; padding: 30px; border-radius: 15px; width: 300px; text-align: center; border: 1px solid #333; }
+        input { width: 100%; padding: 12px; margin: 15px 0; background-color: #2c2c2e; border: 1px solid #444; border-radius: 8px; color: white; box-sizing: border-box; }
+        button { background-color: #0a84ff; color: white; padding: 12px; border: none; border-radius: 8px; font-weight: bold; width: 100%; cursor: pointer;}
+        .error { color: #ff453a; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>🚜 Shetkari CRM</h2>
+        <p style="color: #8e8e93; font-size: 14px;">Enter password to access</p>
+        {% if error %}<p class="error">{{ error }}</p>{% endif %}
+        <form method="POST">
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Login</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
 
 HTML = """
 <!DOCTYPE html>
@@ -50,7 +93,11 @@ HTML = """
     </style>
 </head>
 <body>
-    <h1>🚜 Shetkari CRM</h1>
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h1>🚜 Shetkari CRM</h1>
+        <a href="/logout" class="btn danger" style="padding: 5px 10px; font-size: 12px;">Logout</a>
+    </div>
+    
     {% if view == 'dashboard' %}
         <div class="card">
             <h2>Total Debt: ₹{{ total_debt }}</h2>
@@ -69,6 +116,7 @@ HTML = """
                 {% endfor %}
             </table>
         </div>
+
     {% elif view == 'customer' %}
         <div class="card">
             <h2>{{ farmer[1] }}</h2>
@@ -98,8 +146,25 @@ HTML = """
 </html>
 """
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        if request.form['password'] == APP_PASSWORD:
+            session['logged_in'] = True
+            return redirect(url_for('dashboard'))
+        return render_template_string(LOGIN_HTML, error="Incorrect Password")
+    return render_template_string(LOGIN_HTML)
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    return redirect(url_for('login'))
+
 @app.route('/')
 def dashboard():
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+    
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT SUM(outstanding) FROM farmers")
@@ -113,6 +178,9 @@ def dashboard():
 
 @app.route('/customer/<int:f_id>')
 def customer(f_id):
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+        
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT id, name, phone, outstanding, score, status, promised_date FROM farmers WHERE id=%s", (f_id,))
@@ -122,6 +190,9 @@ def customer(f_id):
 
 @app.route('/pay/<int:f_id>', methods=['POST'])
 def pay(f_id):
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+        
     amount = float(request.form['amount'])
     notes = request.form.get('notes', '')
     conn = get_db()
@@ -134,6 +205,9 @@ def pay(f_id):
 
 @app.route('/bill/<int:f_id>', methods=['POST'])
 def bill(f_id):
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+        
     amount = float(request.form['amount'])
     item = request.form.get('item', 'Purchase')
     conn = get_db()
@@ -145,5 +219,4 @@ def bill(f_id):
     return redirect(url_for('customer', f_id=f_id))
 
 if __name__ == '__main__':
-    init_db()
     app.run(host='0.0.0.0', port=5000, debug=True)
