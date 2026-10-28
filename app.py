@@ -80,7 +80,6 @@ HTML = """
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #333; }
         .red { color: #ff453a; }
         .green { color: #32d74b; }
-        .search-box { display: flex; gap: 10px; margin-bottom: 15px; }
     </style>
 </head>
 <body>
@@ -97,23 +96,26 @@ HTML = """
         
         <div class="card">
             <h2>Customers</h2>
-            <!-- 🛑 NEW: SEARCH BAR -->
-            <form method="GET" action="/" class="search-box">
-                <input type="text" name="search" placeholder="🔍 Search Name or Phone..." value="{{ search_query }}">
-                <button type="submit" class="btn" style="margin-top: 8px; padding: 12px 20px;">Search</button>
-            </form>
+            
+            <!-- 🛑 NEW: INSTANT JAVASCRIPT SEARCH -->
+            <input type="text" id="searchInput" onkeyup="filterTable()" placeholder="🔍 Type to instantly search Name or Phone...">
 
-            <table>
-                <tr><th>Name</th><th>Debt</th><th>Action</th></tr>
-                {% for f in farmers %}
-                <tr>
-                    <td>{{ f[1] }}</td>
-                    <td class="{% if f[3] > 0 %}red{% else %}green{% endif %}">₹{{ f[3] }}</td>
-                    <td><a href="/customer/{{ f[0] }}" class="btn" style="padding: 5px 10px; font-size: 12px;">View</a></td>
-                </tr>
-                {% else %}
-                <tr><td colspan="3" style="text-align: center; color: #8e8e93;">No customers found.</td></tr>
-                {% endfor %}
+            <table id="customerTable">
+                <thead>
+                    <tr><th>Name</th><th>Phone</th><th>Debt</th><th>Action</th></tr>
+                </thead>
+                <tbody>
+                    {% for f in farmers %}
+                    <tr>
+                        <td>{{ f[1] }}</td>
+                        <td>{{ f[2] }}</td>
+                        <td class="{% if f[3] > 0 %}red{% else %}green{% endif %}">₹{{ f[3] }}</td>
+                        <td><a href="/customer/{{ f[0] }}" class="btn" style="padding: 5px 10px; font-size: 12px;">View</a></td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="4" style="text-align: center; color: #8e8e93;">No customers found.</td></tr>
+                    {% endfor %}
+                </tbody>
             </table>
         </div>
 
@@ -142,6 +144,34 @@ HTML = """
         </div>
         <a href="/" class="btn">Back to Dashboard</a>
     {% endif %}
+
+    <!-- 🛑 NEW: JAVASCRIPT FOR INSTANT FILTERING -->
+    <script>
+        function filterTable() {
+            var input = document.getElementById("searchInput");
+            var filter = input.value.toLowerCase();
+            var table = document.getElementById("customerTable");
+            var rows = table.getElementsByTagName("tr");
+
+            // Loop through all table rows (skipping the header row)
+            for (var i = 1; i < rows.length; i++) {
+                var nameCell = rows[i].getElementsByTagName("td")[0];
+                var phoneCell = rows[i].getElementsByTagName("td")[1];
+                
+                if (nameCell || phoneCell) {
+                    var nameText = nameCell.textContent || nameCell.innerText;
+                    var phoneText = phoneCell.textContent || phoneCell.innerText;
+                    
+                    // Check if the name or phone includes the typed text
+                    if (nameText.toLowerCase().indexOf(filter) > -1 || phoneText.toLowerCase().indexOf(filter) > -1) {
+                        rows[i].style.display = "";
+                    } else {
+                        rows[i].style.display = "none";
+                    }
+                }
+            }
+        }
+    </script>
 </body>
 </html>
 """
@@ -165,9 +195,6 @@ def dashboard():
     if not session.get('logged_in'):
         return redirect(url_for('login'))
     
-    # 🛑 NEW: Get the search query from the URL
-    search_query = request.args.get('search', '').strip()
-    
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT SUM(outstanding) FROM farmers")
@@ -175,16 +202,12 @@ def dashboard():
     c.execute("SELECT COUNT(id) FROM farmers")
     total_cust = c.fetchone()[0] or 0
     
-    # 🛑 NEW: Filter by search query if provided
-    if search_query:
-        c.execute("SELECT id, name, phone, outstanding, score, status FROM farmers WHERE name ILIKE %s OR phone ILIKE %s ORDER BY name ASC", (f"%{search_query}%", f"%{search_query}%"))
-    else:
-        c.execute("SELECT id, name, phone, outstanding, score, status FROM farmers ORDER BY name ASC")
-        
+    # 🛑 NEW: We load ALL farmers at once. The JavaScript does the filtering instantly.
+    c.execute("SELECT id, name, phone, outstanding, score, status FROM farmers ORDER BY name ASC")
     farmers = c.fetchall()
     conn.close()
     
-    return render_template_string(HTML, view='dashboard', farmers=farmers, total_debt=f"{total_debt:,.2f}", total_cust=total_cust, search_query=search_query)
+    return render_template_string(HTML, view='dashboard', farmers=farmers, total_debt=f"{total_debt:,.2f}", total_cust=total_cust)
 
 @app.route('/customer/<int:f_id>')
 def customer(f_id):
