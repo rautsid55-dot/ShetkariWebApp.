@@ -20,7 +20,7 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS farmers (
             id SERIAL PRIMARY KEY, name TEXT UNIQUE, phone TEXT,
             outstanding REAL DEFAULT 0, score INTEGER DEFAULT 100,
-            status TEXT DEFAULT 'SAFE', promised_date TEXT DEFAULT NULL
+            status TEXT DEFAULT 'SAFE', promised_date TEXT DEFAULT NULL, notes TEXT DEFAULT ''
         )''')
         c.execute('''CREATE TABLE IF NOT EXISTS logs (
             id SERIAL PRIMARY KEY, farmer_id INTEGER, action TEXT,
@@ -80,6 +80,7 @@ HTML = """
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #333; }
         .red { color: #ff453a; }
         .green { color: #32d74b; }
+        .search-box { display: flex; gap: 10px; margin-bottom: 15px; }
     </style>
 </head>
 <body>
@@ -95,15 +96,13 @@ HTML = """
         </div>
         
         <div class="card">
-            <h3>📥 Import Data</h3>
-            <form method="POST" action="/import" enctype="multipart/form-data">
-                <input type="file" name="file" accept=".csv" required>
-                <button type="submit" class="btn warning">Upload CSV</button>
-            </form>
-        </div>
-
-        <div class="card">
             <h2>Customers</h2>
+            <!-- 🛑 NEW: SEARCH BAR -->
+            <form method="GET" action="/" class="search-box">
+                <input type="text" name="search" placeholder="🔍 Search Name or Phone..." value="{{ search_query }}">
+                <button type="submit" class="btn" style="margin-top: 8px; padding: 12px 20px;">Search</button>
+            </form>
+
             <table>
                 <tr><th>Name</th><th>Debt</th><th>Action</th></tr>
                 {% for f in farmers %}
@@ -112,6 +111,8 @@ HTML = """
                     <td class="{% if f[3] > 0 %}red{% else %}green{% endif %}">₹{{ f[3] }}</td>
                     <td><a href="/customer/{{ f[0] }}" class="btn" style="padding: 5px 10px; font-size: 12px;">View</a></td>
                 </tr>
+                {% else %}
+                <tr><td colspan="3" style="text-align: center; color: #8e8e93;">No customers found.</td></tr>
                 {% endfor %}
             </table>
         </div>
@@ -164,59 +165,26 @@ def dashboard():
     if not session.get('logged_in'):
         return redirect(url_for('login'))
     
+    # 🛑 NEW: Get the search query from the URL
+    search_query = request.args.get('search', '').strip()
+    
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT SUM(outstanding) FROM farmers")
     total_debt = c.fetchone()[0] or 0
     c.execute("SELECT COUNT(id) FROM farmers")
     total_cust = c.fetchone()[0] or 0
-    c.execute("SELECT id, name, phone, outstanding, score, status FROM farmers ORDER BY name ASC")
+    
+    # 🛑 NEW: Filter by search query if provided
+    if search_query:
+        c.execute("SELECT id, name, phone, outstanding, score, status FROM farmers WHERE name ILIKE %s OR phone ILIKE %s ORDER BY name ASC", (f"%{search_query}%", f"%{search_query}%"))
+    else:
+        c.execute("SELECT id, name, phone, outstanding, score, status FROM farmers ORDER BY name ASC")
+        
     farmers = c.fetchall()
     conn.close()
-    return render_template_string(HTML, view='dashboard', farmers=farmers, total_debt=f"{total_debt:,.2f}", total_cust=total_cust)
-
-@app.route('/import', methods=['POST'])
-def import_csv():
-    if not session.get('logged_in'): return redirect(url_for('login'))
     
-    if 'file' not in request.files:
-        return "No file uploaded", 400
-        
-    file = request.files['file']
-    if file.filename == '':
-        return "No file selected", 400
-        
-    if file and file.filename.endswith('.csv'):
-        stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
-        csv_input = csv.reader(stream)
-        next(csv_input) # Skip header
-        
-        conn = get_db()
-        c = conn.cursor()
-        for row in csv_input:
-            if len(row) < 3: continue
-            name = row[0].strip()
-            phone = row[1].strip()
-            try:
-                debt = float(row[2].replace(',', '').strip())
-            except:
-                continue
-                
-            if not name: continue
-            
-            # Check if exists
-            c.execute("SELECT id FROM farmers WHERE LOWER(TRIM(name)) = LOWER(TRIM(%s))", (name,))
-            exists = c.fetchone()
-            
-            if exists:
-                c.execute("UPDATE farmers SET phone=%s, outstanding=%s WHERE id=%s", (phone, debt, exists[0]))
-            else:
-                c.execute("INSERT INTO farmers (name, phone, outstanding) VALUES (%s, %s, %s)", (name, phone, debt))
-                
-        conn.commit()
-        conn.close()
-        
-    return redirect(url_for('dashboard'))
+    return render_template_string(HTML, view='dashboard', farmers=farmers, total_debt=f"{total_debt:,.2f}", total_cust=total_cust, search_query=search_query)
 
 @app.route('/customer/<int:f_id>')
 def customer(f_id):
