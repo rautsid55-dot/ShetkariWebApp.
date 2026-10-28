@@ -1,14 +1,13 @@
 import os
+import csv
+import io
 from flask import Flask, render_template_string, request, redirect, url_for, session
 import psycopg2
 
 app = Flask(__name__)
-app.secret_key = "shetkari_secret_key_98765" # Required for login sessions
+app.secret_key = "shetkari_secret_key_98765"
 
-# 🛑 DEFAULT LOGIN PASSWORD
 APP_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin")
-
-# 🛑 DATABASE CONNECTION
 DB_URL = os.environ.get("DATABASE_URL", "")
 
 def get_db():
@@ -19,31 +18,21 @@ def init_db():
         conn = get_db()
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS farmers (
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE,
-            phone TEXT,
-            outstanding REAL DEFAULT 0,
-            score INTEGER DEFAULT 100,
-            status TEXT DEFAULT 'SAFE',
-            promised_date TEXT DEFAULT NULL
+            id SERIAL PRIMARY KEY, name TEXT UNIQUE, phone TEXT,
+            outstanding REAL DEFAULT 0, score INTEGER DEFAULT 100,
+            status TEXT DEFAULT 'SAFE', promised_date TEXT DEFAULT NULL
         )''')
         c.execute('''CREATE TABLE IF NOT EXISTS logs (
-            id SERIAL PRIMARY KEY,
-            farmer_id INTEGER,
-            action TEXT,
-            points INTEGER,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id SERIAL PRIMARY KEY, farmer_id INTEGER, action TEXT,
+            points INTEGER, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
         conn.commit()
         conn.close()
-        print("Database initialized successfully.")
     except Exception as e:
         print(f"DB Init Error: {e}")
 
-# 🛑 RUN INIT_DB IMMEDIATELY SO GUNICORN CREATES TABLES
 init_db()
 
-# --- HTML TEMPLATES ---
 LOGIN_HTML = """
 <!DOCTYPE html>
 <html>
@@ -82,9 +71,10 @@ HTML = """
         body { font-family: 'Segoe UI', sans-serif; background-color: #0a0a0c; color: white; margin: 0; padding: 20px; }
         .card { background-color: #1c1c1e; padding: 20px; border-radius: 15px; margin-bottom: 15px; border: 1px solid #333; }
         h1, h2 { margin-top: 0; }
-        .btn { background-color: #0a84ff; color: white; padding: 12px 20px; border: none; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin-top: 10px;}
+        .btn { background-color: #0a84ff; color: white; padding: 12px 20px; border: none; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin-top: 10px; cursor: pointer;}
         .danger { background-color: #ff453a; }
         .success { background-color: #32d74b; color: black; }
+        .warning { background-color: #ff9f0a; color: black; }
         input, select { width: 100%; padding: 12px; margin: 8px 0; background-color: #2c2c2e; border: 1px solid #444; border-radius: 8px; color: white; box-sizing: border-box; }
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #333; }
@@ -103,6 +93,15 @@ HTML = """
             <h2>Total Debt: ₹{{ total_debt }}</h2>
             <p>Total Customers: {{ total_cust }}</p>
         </div>
+        
+        <div class="card">
+            <h3>📥 Import Data</h3>
+            <form method="POST" action="/import" enctype="multipart/form-data">
+                <input type="file" name="file" accept=".csv" required>
+                <button type="submit" class="btn warning">Upload CSV</button>
+            </form>
+        </div>
+
         <div class="card">
             <h2>Customers</h2>
             <table>
@@ -127,7 +126,7 @@ HTML = """
         <div class="card">
             <h3>Receive Payment</h3>
             <form method="POST" action="/pay/{{ farmer[0] }}">
-                <input type="number" name="amount" placeholder="Amount (₹)" required>
+                <input type="number" step="0.01" name="amount" placeholder="Amount (₹)" required>
                 <input type="text" name="notes" placeholder="Notes (e.g. Cash)">
                 <button type="submit" class="btn success">Receive</button>
             </form>
@@ -135,9 +134,9 @@ HTML = """
         <div class="card">
             <h3>Add Bill</h3>
             <form method="POST" action="/bill/{{ farmer[0] }}">
-                <input type="number" name="amount" placeholder="Bill Amount (₹)" required>
+                <input type="number" step="0.01" name="amount" placeholder="Bill Amount (₹)" required>
                 <input type="text" name="item" placeholder="Item (e.g. Seeds)">
-                <button type="submit" class="btn" style="background-color: #ff9f0a;">Add Bill</button>
+                <button type="submit" class="btn warning">Add Bill</button>
             </form>
         </div>
         <a href="/" class="btn">Back to Dashboard</a>
@@ -176,11 +175,52 @@ def dashboard():
     conn.close()
     return render_template_string(HTML, view='dashboard', farmers=farmers, total_debt=f"{total_debt:,.2f}", total_cust=total_cust)
 
+@app.route('/import', methods=['POST'])
+def import_csv():
+    if not session.get('logged_in'): return redirect(url_for('login'))
+    
+    if 'file' not in request.files:
+        return "No file uploaded", 400
+        
+    file = request.files['file']
+    if file.filename == '':
+        return "No file selected", 400
+        
+    if file and file.filename.endswith('.csv'):
+        stream = io.StringIO(file.stream.read().decode("UTF8"), newline=None)
+        csv_input = csv.reader(stream)
+        next(csv_input) # Skip header
+        
+        conn = get_db()
+        c = conn.cursor()
+        for row in csv_input:
+            if len(row) < 3: continue
+            name = row[0].strip()
+            phone = row[1].strip()
+            try:
+                debt = float(row[2].replace(',', '').strip())
+            except:
+                continue
+                
+            if not name: continue
+            
+            # Check if exists
+            c.execute("SELECT id FROM farmers WHERE LOWER(TRIM(name)) = LOWER(TRIM(%s))", (name,))
+            exists = c.fetchone()
+            
+            if exists:
+                c.execute("UPDATE farmers SET phone=%s, outstanding=%s WHERE id=%s", (phone, debt, exists[0]))
+            else:
+                c.execute("INSERT INTO farmers (name, phone, outstanding) VALUES (%s, %s, %s)", (name, phone, debt))
+                
+        conn.commit()
+        conn.close()
+        
+    return redirect(url_for('dashboard'))
+
 @app.route('/customer/<int:f_id>')
 def customer(f_id):
-    if not session.get('logged_in'):
-        return redirect(url_for('login'))
-        
+    if not session.get('logged_in'): return redirect(url_for('login'))
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT id, name, phone, outstanding, score, status, promised_date FROM farmers WHERE id=%s", (f_id,))
@@ -190,9 +230,7 @@ def customer(f_id):
 
 @app.route('/pay/<int:f_id>', methods=['POST'])
 def pay(f_id):
-    if not session.get('logged_in'):
-        return redirect(url_for('login'))
-        
+    if not session.get('logged_in'): return redirect(url_for('login'))
     amount = float(request.form['amount'])
     notes = request.form.get('notes', '')
     conn = get_db()
@@ -205,9 +243,7 @@ def pay(f_id):
 
 @app.route('/bill/<int:f_id>', methods=['POST'])
 def bill(f_id):
-    if not session.get('logged_in'):
-        return redirect(url_for('login'))
-        
+    if not session.get('logged_in'): return redirect(url_for('login'))
     amount = float(request.form['amount'])
     item = request.form.get('item', 'Purchase')
     conn = get_db()
